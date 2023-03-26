@@ -112,7 +112,8 @@ def get_marker_decode_dataframes():
     notask_neural_df = neural_df[np.logical_and.reduce([nolayout_neural_mask, noposition_neural_mask])]
     task_neural_df = neural_df.copy()
 
-    data_dict = {'wrist_df': wrist_df, 'task_neural_df': task_neural_df, 'notask_neural_df': notask_neural_df}
+    data_dict = {'wrist_df': wrist_df, 'task_neural_df': task_neural_df, 'notask_neural_df': notask_neural_df,
+                 'metadata': metadata}
     return data_dict
 
 
@@ -183,7 +184,70 @@ class model_gru(nn.Module):
         hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
 
         return hidden
+
+#RNN architecture for decoding kinematics
+class model_lstm(nn.Module):
+    def __init__(self, input_size, output_size, hidden_dim, n_layers, dropout, device, bidirectional=False,
+                 cat_features=None):
+        super(model_lstm, self).__init__()
+
+        #multiplier based on bidirectional parameter
+        if bidirectional:
+            num_directions = 2
+        else:
+            num_directions = 1
+
+        # Defining some parameters
+        self.hidden_dim = hidden_dim       
+        self.n_layers = n_layers * num_directions
+        self.device = device
+        self.dropout = dropout
+        self.bidirectional = bidirectional
+        self.cat_features = cat_features
+        self.input_size = input_size
+
+        if self.cat_features is not None:
+            self.num_cat_features = np.sum(self.cat_features).astype(int)
+            self.hidden_fc = nn.Linear(self.num_cat_features, self.hidden_dim)
+
+            self.input_size = self.input_size - self.num_cat_features
+            # self.input_size = self.input_size
+
+            
+        else:
+            self.fc = nn.Linear(self.hidden_dim * num_directions, output_size)
+
+        self.fc = nn.Linear((self.hidden_dim* num_directions), output_size)
+        self.lstm = nn.LSTM(self.input_size, self.hidden_dim, n_layers, batch_first=True, dropout=dropout, bidirectional=bidirectional) 
     
+    def forward(self, x):
+        batch_size = x.size(0)
+        # Initializing hidden state for first input using method defined below
+        hidden, cell = self.init_hidden(batch_size)
+
+        # Passing in the input and hidden state into the model and obtaining outputs
+        if self.cat_features is not None:
+            # cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
+
+            # hidden = hidden + cat_hidden
+            out, (hidden, cell) = self.lstm(x[:, :, ~self.cat_features], (hidden, cell))
+
+        else:
+            out, (hidden, cell) = self.lstm(x, (hidden, cell))
+
+        out = out.contiguous()
+        out = self.fc(out)
+        return out, hidden
+    
+    def init_hidden(self, batch_size):
+        weight = next(self.parameters()).data.to(self.device)
+
+        #LSTM initialization
+        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
+        cell = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device) + 1
+
+        return hidden, cell
+        
 
 # Dataset class to handle mocap dataframes from SEE project
 class SEE_Dataset(torch.utils.data.Dataset):
@@ -484,7 +548,7 @@ def contrast_mse(y_pred, y_true, hidden, labels, weight=1):
     hidden = hidden.transpose(0,1)
     hidden = hidden.flatten(start_dim=1, end_dim=2)
 
-    hidden_loss_func = losses.TripletMarginLoss()
+    hidden_loss_func = losses.ContrastiveLoss()
     hidden_loss = hidden_loss_func(hidden, labels)
 
     mse_loss_func = nn.MSELoss()
@@ -502,99 +566,100 @@ def mse(y_pred, y_true, hidden, labels, weight=1):
 
 
 def run_wiener(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True, window_size=10, num_cat=0, label_col=None):
-  window_size = 10 # doesn't matter for kalman filter
-  neural_offset = 2
-  if task_info:
-    exclude_processing = np.zeros(len(neural_df['unit'].unique()))
-    exclude_processing[-num_cat:] = np.ones(num_cat)
-    exclude_processing = exclude_processing.astype(bool)
-  else:
-    exclude_processing = None
-    
-  data_arrays, generators = make_generators(
+    window_size = 10 # doesn't matter for kalman filter
+    neural_offset = 2
+    if task_info:
+        exclude_processing = np.zeros(len(neural_df['unit'].unique()))
+        exclude_processing[-num_cat:] = np.ones(num_cat)
+        exclude_processing = exclude_processing.astype(bool)
+    else:
+        exclude_processing = None
+
+    data_arrays, generators = make_generators(
     pred_df, neural_df, neural_offset, cv_dict, metadata, 
     exclude_neural=exclude_processing, window_size=window_size,
     flip_outputs=True, label_col=label_col)
 
-  # Unpack tuple into variables
-  training_set, validation_set, testing_set = data_arrays
-  training_generator, training_eval_generator, validation_generator, testing_generator = generators
+    # Unpack tuple into variables
+    training_set, validation_set, testing_set = data_arrays
+    training_generator, training_eval_generator, validation_generator, testing_generator = generators
 
-  X_train_data = training_set[:][0][:,-1,:].detach().cpu().numpy()
-  y_train_data = training_set[:][1][:,-1,:].detach().cpu().numpy()
+    X_train_data = training_set[:][0][:,-1,:].detach().cpu().numpy()
+    y_train_data = training_set[:][1][:,-1,:].detach().cpu().numpy()
 
-  X_test_data = testing_set[:][0][:,-1,:].detach().cpu().numpy()
-  y_test_data = testing_set[:][1][:,-1,:].detach().cpu().numpy()
+    X_test_data = testing_set[:][0][:,-1,:].detach().cpu().numpy()
+    y_test_data = testing_set[:][1][:,-1,:].detach().cpu().numpy()
 
-  #Fit and run wiener filter
-  model_wr = Neural_Decoding.decoders.WienerFilterDecoder() 
-  model_wr.fit(X_train_data,y_train_data)
+    #Fit and run wiener filter
+    model_wr = Neural_Decoding.decoders.WienerFilterDecoder() 
+    model_wr.fit(X_train_data,y_train_data)
 
-  wr_train_pred = model_wr.predict(X_train_data)
-  wr_test_pred = model_wr.predict(X_test_data)
+    wr_train_pred = model_wr.predict(X_train_data)
+    wr_test_pred = model_wr.predict(X_test_data)
 
-  #Compute decoding
-  wr_train_corr = mocap_functions.matrix_corr(wr_train_pred,y_train_data)
-  wr_test_corr = mocap_functions.matrix_corr(wr_test_pred,y_test_data)
+    #Compute decoding performance
+    wr_train_corr = mocap_functions.matrix_corr(wr_train_pred,y_train_data)
+    wr_test_corr = mocap_functions.matrix_corr(wr_test_pred,y_test_data)
 
-  return wr_train_pred, wr_test_pred, wr_train_corr, wr_test_corr
+    res_dict = {'train_pred': wr_train_pred, 'test_pred': wr_test_pred,
+                'train_corr': wr_train_corr, 'test_corr': wr_test_corr}
+
+    return model_wr, res_dict
 
 def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True,
             window_size=10, num_cat=0, label_col=None):
-  if task_info:
-    exclude_processing = np.zeros(len(neural_df['unit'].unique()))
-    exclude_processing[-num_cat:] = np.ones(num_cat)
-    exclude_processing = exclude_processing.astype(bool)
-    criterion = contrast_mse
+    if task_info:
+        exclude_processing = np.zeros(len(neural_df['unit'].unique()))
+        exclude_processing[-num_cat:] = np.ones(num_cat)
+        exclude_processing = exclude_processing.astype(bool)
+        criterion = contrast_mse
 
-  else:
-    exclude_processing = None
-    criterion = mse
+    else:
+        exclude_processing = None
+        criterion = mse
 
-  data_arrays, generators = make_generators(
+    data_arrays, generators = make_generators(
     pred_df, neural_df, neural_offset, cv_dict, metadata, exclude_neural=exclude_processing,
-    window_size=window_size, flip_outputs=True, batch_size=200, label_col=label_col)
-  
-  # Unpack tuple into variables
-  training_set, validation_set, testing_set = data_arrays
-  training_generator, training_eval_generator, validation_generator, testing_generator = generators
+    window_size=window_size, flip_outputs=True, batch_size=1000, label_col=label_col)
 
-  X_train_data = training_set[:][0][:,-1,:].detach().cpu().numpy()
-  y_train_data = training_set[:][1][:,-1,:].detach().cpu().numpy()
+    # Unpack tuple into variables
+    training_set, validation_set, testing_set = data_arrays
+    training_generator, training_eval_generator, validation_generator, testing_generator = generators
 
-  X_test_data = testing_set[:][0][:,-1,:].detach().cpu().numpy()
-  y_test_data = testing_set[:][1][:,-1,:].detach().cpu().numpy()
+    X_train_data = training_set[:][0][:,-1,:].detach().cpu().numpy()
+    y_train_data = training_set[:][1][:,-1,:].detach().cpu().numpy()
 
-  #Define hyperparameters
-  lr = 1e-4
-  weight_decay = 1e-4
-  hidden_dim = 100
-  dropout = 0.5
-  n_layers = 2
-  max_epochs = 1000
-  input_size = X_train_data.shape[1] 
-  output_size = y_train_data.shape[1] 
+    X_test_data = testing_set[:][0][:,-1,:].detach().cpu().numpy()
+    y_test_data = testing_set[:][1][:,-1,:].detach().cpu().numpy()
 
+    #Define hyperparameters
+    lr = 1e-4
+    weight_decay = 1e-4
+    hidden_dim = 100
+    dropout = 0.5
+    n_layers = 2
+    max_epochs = 1000
+    input_size = X_train_data.shape[1] 
+    output_size = y_train_data.shape[1] 
 
-  # model_rnn = mocap_functions.model_gru(input_size, output_size, hidden_dim, n_layers, dropout, device).to(device)
-  model_rnn = model_gru(input_size, output_size, hidden_dim, n_layers, dropout, device, cat_features=exclude_processing).to(device)
+    model_rnn = model_lstm(input_size, output_size, hidden_dim, n_layers, dropout, device, cat_features=exclude_processing).to(device)
 
-  # Define Loss, Optimizerints h
-  optimizer = torch.optim.Adam(model_rnn.parameters(), lr=lr, weight_decay=weight_decay)
+    # Define Loss, Optimizerints h
+    optimizer = torch.optim.Adam(model_rnn.parameters(), lr=lr, weight_decay=weight_decay)
 
-  #Train model
-  loss_dict = train_validate_model(model_rnn, optimizer, criterion, max_epochs, training_generator, validation_generator, device, 10, 5)
+    #Train model
+    loss_dict = train_validate_model(model_rnn, optimizer, criterion, max_epochs, training_generator, validation_generator, device, 10, 5)
 
-  #Evaluate trained model
-  rnn_train_pred = evaluate_model(model_rnn, training_eval_generator, device)
-  rnn_test_pred = evaluate_model(model_rnn, testing_generator, device)
+    #Evaluate trained model
+    rnn_train_pred = evaluate_model(model_rnn, training_eval_generator, device)
+    rnn_test_pred = evaluate_model(model_rnn, testing_generator, device)
 
-  #Evaluate trained model
-  rnn_train_pred = evaluate_model(model_rnn, training_eval_generator, device)
-  rnn_test_pred = evaluate_model(model_rnn, testing_generator, device)
+    rnn_train_corr = mocap_functions.matrix_corr(rnn_train_pred, y_train_data)
+    rnn_test_corr = mocap_functions.matrix_corr(rnn_test_pred, y_test_data)
 
-  rnn_train_corr = mocap_functions.matrix_corr(rnn_train_pred, y_train_data)
-  rnn_test_corr = mocap_functions.matrix_corr(rnn_test_pred, y_test_data)
+    res_dict = {'loss_dict': loss_dict,
+                'train_pred': rnn_train_pred, 'test_pred': rnn_test_pred,
+                'train_corr': rnn_train_corr, 'test_corr': rnn_test_corr}
 
-  return rnn_train_pred, rnn_test_pred, rnn_train_corr, rnn_test_corr
+    return model_rnn, res_dict
 
