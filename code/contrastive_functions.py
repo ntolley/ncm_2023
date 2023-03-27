@@ -227,9 +227,9 @@ class model_lstm(nn.Module):
 
         # Passing in the input and hidden state into the model and obtaining outputs
         if self.cat_features is not None:
-            # cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
+            cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
 
-            # hidden = hidden + cat_hidden
+            hidden = hidden + cat_hidden
             out, (hidden, cell) = self.lstm(x[:, :, ~self.cat_features], (hidden, cell))
 
         else:
@@ -322,7 +322,7 @@ class SEE_Dataset(torch.utils.data.Dataset):
         posData_list, neuralData_list = [], []
         for trial in self.trial_idx:
             posData_array = np.stack(kinematic_df['posData'][kinematic_df['trial'] == trial].values).transpose() 
-            neuralData_array = np.stack(neural_df['rates'][neural_df['trial'] == trial].values).squeeze().transpose() 
+            neuralData_array = np.stack(neural_df['rates'][neural_df['trial'] == trial].values).transpose() 
 
             posData_list.append(posData_array)
             neuralData_list.append(neuralData_array)
@@ -549,6 +549,7 @@ def contrast_mse(y_pred, y_true, hidden, labels, weight=1):
     hidden = hidden.flatten(start_dim=1, end_dim=2)
 
     hidden_loss_func = losses.ContrastiveLoss()
+    # hidden_loss_func = losses.TripletMarginLoss()
     hidden_loss = hidden_loss_func(hidden, labels)
 
     mse_loss_func = nn.MSELoss()
@@ -635,7 +636,7 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
     #Define hyperparameters
     lr = 1e-4
     weight_decay = 1e-4
-    hidden_dim = 100
+    hidden_dim = 20
     dropout = 0.5
     n_layers = 2
     max_epochs = 1000
