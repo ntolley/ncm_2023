@@ -38,7 +38,7 @@ class model_ann(nn.Module):
     def forward(self, x):
         #Encoding step
         for idx in range(len(self.layer_list)):
-            x = F.tanh(self.layer_list[idx](x))
+            x = torch.tanh(self.layer_list[idx](x))
 
         return x
 
@@ -401,7 +401,7 @@ class SEE_Dataset(torch.utils.data.Dataset):
         posData_list, neuralData_list = [], []
         for trial in self.trial_idx:
             posData_array = np.stack(kinematic_df['posData'][kinematic_df['trial'] == trial].values).transpose() 
-            neuralData_array = np.stack(neural_df['rates'][neural_df['trial'] == trial].values).squeeze().transpose() 
+            neuralData_array = np.stack(neural_df['rates'][neural_df['trial'] == trial].values).transpose() 
 
             posData_list.append(posData_array)
             neuralData_list.append(neuralData_array)
@@ -432,7 +432,8 @@ class SEE_Dataset(torch.utils.data.Dataset):
             y_tensor = self.format_splits(self.posData_list)
             X_tensor = self.format_splits(self.neuralData_list)
 
-        X_tensor, y_tensor = X_tensor[:,:-self.split_offset:self.data_step_size,:], y_tensor[:,self.split_offset::self.data_step_size,:]
+        # X_tensor, y_tensor = X_tensor[:,:-self.split_offset:self.data_step_size,:], y_tensor[:,self.split_offset::self.data_step_size,:]
+        X_tensor, y_tensor = X_tensor[:-self.split_offset,::self.data_step_size,:], y_tensor[self.split_offset:,::self.data_step_size,:]
         assert X_tensor.shape[0] == y_tensor.shape[0]
         return X_tensor, y_tensor
 

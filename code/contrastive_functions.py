@@ -16,7 +16,7 @@ import spike_train_functions
 import elephant
 import quantities as pq
 # import h5py
-from sklearn.model_selection import ShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.linear_model import LinearRegression
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -43,24 +43,34 @@ device = torch.device("cuda:0")
 
 torch.backends.cudnn.benchmark = True
 
-# Prepare dataframes for movement decoding
-def get_marker_decode_dataframes():
-    cam_idx = 1
-    kinematic_df, neural_df, metadata = mocap_functions.load_mocap_df('../data/SPK20220308/task_data/', kinematic_suffix=f'_cam{cam_idx}')
-    num_trials = len(kinematic_df['trial'].unique())
+def load_mocap_df(data_path, kinematic_suffix=None):
+    kinematic_df = pd.read_pickle(f'{data_path}kinematic_df{kinematic_suffix}_preevent.pkl')
+    neural_df = pd.read_pickle(data_path + 'neural_df_preevent.pkl')
 
-    null_percent = kinematic_df.groupby('name')['posData'].apply(list).map(
-        np.concatenate).map(lambda x: np.sum(np.isnan(x)) / len(x))
+    # read python dict back from the file
+    metadata_file = open(data_path + 'metadata_preevent.pkl', 'rb')
+    metadata = pickle.load(metadata_file)
+    metadata_file.close()
+
+    return kinematic_df, neural_df, metadata
+
+# Prepare dataframes for movement decoding
+def get_marker_decode_dataframes(noise_fold=0):
+    cam_idx = 1
+    # kinematic_df, neural_df, metadata = mocap_functions.load_mocap_df('../data/SPK20220308/task_data/', kinematic_suffix=f'_cam{cam_idx}')
+    kinematic_df, neural_df, metadata = load_mocap_df('../data/SPK20220308/task_data/', kinematic_suffix=f'_cam{cam_idx}')
+
+    num_trials = len(kinematic_df['trial'].unique())
 
     # pos_filter = [1, 4]
     pos_filter = [1,2,3,4]
-    # pos_remove_filter = [f'position_{pos_idx}' for pos_idx in [2,3]]
     pos_remove_filter = [f'position_{pos_idx}' for pos_idx in []]
+    # pos_remove_filter = [f'position_{pos_idx}' for pos_idx in [2,3]]
 
     layout_filter = [1,2,3,4]
     # layout_filter = [1,2]
-
     layout_remove_filter = [f'layout_{layout_idx}' for layout_idx in []]
+    # layout_remove_filter = [f'layout_{layout_idx}' for layout_idx in [3,4]]
 
 
     neural_df = neural_df[np.in1d(neural_df['position'], pos_filter)].reset_index(drop=True)
@@ -102,6 +112,41 @@ def get_marker_decode_dataframes():
 
     assert np.array_equal(neural_df['trial'].unique(), wrist_df['trial'].unique())
 
+    trial_ids = neural_df['trial'].unique()
+    num_trials_filtered = len(trial_ids)
+
+    # Give each layout/position combination a unique label
+    trial_type_dict = dict()
+    label_idx = 0
+    for layout_idx in range(1,5):
+        for position_idx in range(1,5):
+            trial_type_dict[(layout_idx, position_idx)] = label_idx
+            label_idx = label_idx + 1
+
+    # Populate list with labels to match each trials
+    trial_labels = list()
+    for trial_id in trial_ids:
+        layout_idx = neural_df[neural_df['trial'] == trial_id]['layout'].values[0]
+        position_idx = neural_df[neural_df['trial'] == trial_id]['position'].values[0]
+        trial_labels.append(trial_type_dict[(layout_idx, position_idx)])
+    trial_labels = np.array(trial_labels)
+
+    
+
+    #Generate cv_dict for regular train/test/validate split (no rolling window)
+    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
+    val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
+
+    cv_dict = {}
+    for fold, (train_val_idx, test_idx) in enumerate(cv_split.split(trial_ids, trial_labels)):
+        val_trial_labels = trial_labels[train_val_idx]
+        for t_idx, v_idx in val_split.split(train_val_idx, val_trial_labels): #No looping, just used to split train/validation sets
+            cv_dict[fold] = {'train_idx':trial_ids[train_val_idx[t_idx]], 
+                            'test_idx':trial_ids[test_idx], 
+                            'validation_idx':trial_ids[train_val_idx[v_idx]]} 
+
+    neural_df, wrist_df = add_noise(neural_df, wrist_df, cv_dict, noise_fold, num_trials)
+
     # Smooth everything after adding noise
     smooth_func = partial(savgol_filter, window_length=31, polyorder=3)
     neural_df['rates'] = neural_df['rates'].map(smooth_func)
@@ -113,77 +158,8 @@ def get_marker_decode_dataframes():
     task_neural_df = neural_df.copy()
 
     data_dict = {'wrist_df': wrist_df, 'task_neural_df': task_neural_df, 'notask_neural_df': notask_neural_df,
-                 'metadata': metadata}
+                 'metadata': metadata, 'cv_dict': cv_dict, 'noise_fold': noise_fold}
     return data_dict
-
-
-#GRU architecture for decoding kinematics
-class model_gru(nn.Module):
-    def __init__(self, input_size, output_size, hidden_dim, n_layers, dropout, device, bidirectional=False,
-                 cat_features=None):
-        super(model_gru, self).__init__()
-
-        #multiplier based on bidirectional parameter
-        if bidirectional:
-            num_directions = 2
-        else:
-            num_directions = 1
-
-        # Defining some parameters
-        self.hidden_dim = hidden_dim       
-        self.n_layers = n_layers * num_directions
-        self.device = device
-        self.dropout = dropout
-        self.bidirectional = bidirectional
-        self.cat_features = cat_features
-        self.input_size = input_size
-
-        if self.cat_features is not None:
-            self.num_cat_features = np.sum(self.cat_features).astype(int)
-            self.hidden_fc = nn.Linear(self.num_cat_features, self.hidden_dim)
-
-            self.input_size = self.input_size - self.num_cat_features
-            # self.input_size = self.input_size
-
-            
-        else:
-            self.fc = nn.Linear(self.hidden_dim * num_directions, output_size)
-
-        self.fc = nn.Linear((self.hidden_dim* num_directions), output_size)
-        self.gru = nn.GRU(self.input_size, self.hidden_dim, n_layers, batch_first=True, dropout=dropout, bidirectional=bidirectional) 
-
-      
-
-        #Defining the layers
-    
-    def forward(self, x):
-        batch_size = x.size(0)
-        # Initializing hidden state for first input using method defined below
-        hidden = self.init_hidden(batch_size)
-
-        # Passing in the input and hidden state into the model and obtaining outputs
-        if self.cat_features is not None:
-            cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
-            hidden = hidden + cat_hidden
-            out, hidden = self.gru(x[:, :, ~self.cat_features], hidden)
-            # out, hidden = self.gru(x, hidden)
-
-            out = out.contiguous()
-
-        else:
-            out, hidden = self.gru(x, hidden)
-            out = out.contiguous()
-        
-        out = self.fc(out)
-        return out, hidden
-    
-    def init_hidden(self, batch_size):
-        weight = next(self.parameters()).data.to(self.device)
-
-        #GRU initialization
-        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
-
-        return hidden
 
 #RNN architecture for decoding kinematics
 class model_lstm(nn.Module):
@@ -227,26 +203,73 @@ class model_lstm(nn.Module):
 
         # Passing in the input and hidden state into the model and obtaining outputs
         if self.cat_features is not None:
-            cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
+            # cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
+            # hidden = hidden + cat_hidden
 
-            hidden = hidden + cat_hidden
-            out, (hidden, cell) = self.lstm(x[:, :, ~self.cat_features], (hidden, cell))
+            out_lstm, (hidden, cell) = self.lstm(x[:, :, ~self.cat_features], (hidden, cell))
 
         else:
-            out, (hidden, cell) = self.lstm(x, (hidden, cell))
+            out_lstm, (hidden, cell) = self.lstm(x, (hidden, cell))
 
-        out = out.contiguous()
-        out = self.fc(out)
-        return out, hidden
+        out_final = out_lstm.contiguous()
+        out_final = self.fc(out_final)
+        return out_final, hidden, cell, out_lstm
     
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data.to(self.device)
 
         #LSTM initialization
         hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
-        cell = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device) + 1
+        cell = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
 
         return hidden, cell
+
+def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
+    rng = np.random.default_rng(111)
+
+    kinematic_noise = 20
+    neural_noise = 1
+    noise_rounds = 10
+
+    neural_df_list = [neural_df]
+    wrist_df_list = [wrist_df]
+    for round in (1, noise_rounds + 1):
+        # Neural data
+        neural_temp_df = neural_df[np.in1d(neural_df['trial'], cv_dict[fold]['train_idx'])].copy()
+        
+        nolayout_mask = ~(neural_temp_df['unit'].str.contains(pat='layout'))
+        noposition_mask = ~(neural_temp_df['unit'].str.contains(pat='position'))
+
+        unit_mask = np.logical_and(nolayout_mask, noposition_mask)
+
+        noise_data = neural_temp_df[unit_mask]['rates'].apply(
+            lambda x: x + rng.normal(loc=0, scale=neural_noise, size=len(x)))
+        neural_temp_df['rates'][unit_mask] = noise_data
+        neural_temp_df['trial'] += (round * num_trials)
+        neural_df_list.append(neural_temp_df)
+
+        # Kinematic data
+        wrist_temp_df = wrist_df[np.in1d(wrist_df['trial'], cv_dict[fold]['train_idx'])].copy()
+
+        nolayout_mask = ~(wrist_temp_df['name'].str.contains(pat='layout'))
+        noposition_mask = ~(wrist_temp_df['name'].str.contains(pat='position'))
+
+        unit_mask = np.logical_and(nolayout_mask, noposition_mask)
+
+        noise_data = wrist_temp_df[unit_mask]['posData'].apply(
+            lambda x: x + rng.normal(loc=0, scale=kinematic_noise, size=len(x)))
+        wrist_temp_df['posData'][unit_mask] = noise_data
+        wrist_temp_df['trial'] += (round * num_trials)
+        wrist_df_list.append(wrist_temp_df)
+
+        new_trials = np.concatenate([cv_dict[fold]['train_idx'], wrist_temp_df['trial'].unique()])
+        cv_dict[fold]['train_idx'] = new_trials
+
+    neural_df = pd.concat(neural_df_list).reset_index(drop=True)
+    wrist_df = pd.concat(wrist_df_list).reset_index(drop=True)
+
+    return neural_df, wrist_df
+
         
 
 # Dataset class to handle mocap dataframes from SEE project
@@ -348,8 +371,9 @@ class SEE_Dataset(torch.utils.data.Dataset):
             if self.window_size == 1:
                 padded_trial = torch.from_numpy(data_list[trial_idx])
             else:
-                padded_trial = torch.nn.functional.pad(
-                    torch.from_numpy(data_list[trial_idx].T), pad=(self.window_size, 0)).transpose(0, 1)
+                # padded_trial = torch.nn.functional.pad(
+                #     torch.from_numpy(data_list[trial_idx].T), pad=(self.window_size, 0)).transpose(0, 1)
+                padded_trial = torch.from_numpy(data_list[trial_idx])
             
             unfolded_trial = padded_trial.unfold(0, self.window_size, self.data_step_size).transpose(1, 2)
             unfolded_data_list.append(unfolded_trial)
@@ -369,7 +393,9 @@ class SEE_Dataset(torch.utils.data.Dataset):
             y_tensor = self.format_splits(self.posData_list, make_labels=self.make_labels)
             X_tensor = self.format_splits(self.neuralData_list)
 
-        X_tensor, y_tensor = X_tensor[:,:-self.split_offset:self.data_step_size,:], y_tensor[:,self.split_offset::self.data_step_size,:]
+        # X_tensor, y_tensor = X_tensor[:,:-self.split_offset:self.data_step_size,:], y_tensor[:,self.split_offset::self.data_step_size,:]
+        X_tensor, y_tensor = X_tensor[:,self.split_offset::self.data_step_size,:], y_tensor[:,:-self.split_offset:self.data_step_size,:]
+
         assert X_tensor.shape[0] == y_tensor.shape[0]
         return X_tensor, y_tensor
 
@@ -460,8 +486,11 @@ def train_validate_model(model, optimizer, criterion, max_epochs, training_gener
             batch_y = batch_y.float().to(device)
             labels = labels.float().to(device)
 
-            output, hidden = model(batch_x)
-            train_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, labels)
+            # output, hidden = model(batch_x)
+            # train_loss = criterion(output[:,-10:-1,:], batch_y[:,-10:-1,:], hidden, labels)
+
+            output, hidden, cell, output_lstm = model(batch_x)
+            train_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, output_lstm, labels)
             train_loss.backward() # Does backpropagation and calculates gradients
             optimizer.step() # Updates the weights accordingly
 
@@ -478,8 +507,11 @@ def train_validate_model(model, optimizer, criterion, max_epochs, training_gener
                 batch_y = batch_y.float().to(device)
                 labels = labels.float().to(device)
 
-                output, hidden = model(batch_x)
-                validation_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, labels)
+                # output, hidden = model(batch_x)
+                # validation_loss = criterion(output[:,-10:-1,:], batch_y[:,-10:-1,:], hidden, labels)
+
+                output, hidden, cell, output_lstm = model(batch_x)
+                validation_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, output_lstm, labels)
 
                 validation_batch_loss.append(validation_loss.item())
 
@@ -536,7 +568,8 @@ def evaluate_model(model, generator, device):
             batch_y = batch_y.float().to(device)
             labels = labels.float().to(device)
 
-            output, _ = model(batch_x)
+            # output, _ = model(batch_x)
+            output, _, _, _ = model(batch_x)
             y_pred_tensor[batch_idx:(batch_idx+output.size(0)),:] = output[:,-1,:]
             batch_idx += output.size(0)
 
@@ -544,31 +577,40 @@ def evaluate_model(model, generator, device):
     return y_pred
     
 # Joint loss function: contrastive_loss + MSE
-def contrast_mse(y_pred, y_true, hidden, labels, weight=1):
+def contrast_mse(y_pred, y_true, hidden, cell, output, labels, weight=0.1):
     hidden = hidden.transpose(0,1)
     hidden = hidden.flatten(start_dim=1, end_dim=2)
 
-    hidden_loss_func = losses.ContrastiveLoss()
+    cell = cell.transpose(0,1)
+    cell = cell.flatten(start_dim=1, end_dim=2)
+
     # hidden_loss_func = losses.TripletMarginLoss()
-    hidden_loss = hidden_loss_func(hidden, labels)
+
+    loss_func = losses.SupConLoss(temperature=0.1)
+    hidden_loss = loss_func(hidden, labels)
+    cell_loss = loss_func(cell, labels)
+    # output_loss = loss_func(output.flatten(start_dim=1, end_dim=2), labels)
+
 
     mse_loss_func = nn.MSELoss()
     mse_loss = mse_loss_func(y_pred, y_true)
 
-    loss = mse_loss + (weight * hidden_loss)
+    loss = mse_loss + (weight * (hidden_loss + cell_loss))
+    # loss = mse_loss + (weight * output_loss)
+
 
     return loss
 
 # Dummy wrapper for MSE (last 3 parameters unused)
-def mse(y_pred, y_true, hidden, labels, weight=1):
+def mse(y_pred, y_true, hidden, cell, output, labels, weight=1):
     mse_loss_func = nn.MSELoss()
     loss = mse_loss_func(y_pred, y_true)
     return loss
 
 
 def run_wiener(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True, window_size=10, num_cat=0, label_col=None):
-    window_size = 10 # doesn't matter for kalman filter
-    neural_offset = 2
+    # window_size = 1 # doesn't matter for kalman filter
+    # neural_offset = 2
     if task_info:
         exclude_processing = np.zeros(len(neural_df['unit'].unique()))
         exclude_processing[-num_cat:] = np.ones(num_cat)
@@ -636,7 +678,7 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
     #Define hyperparameters
     lr = 1e-4
     weight_decay = 1e-4
-    hidden_dim = 20
+    hidden_dim = 100
     dropout = 0.5
     n_layers = 2
     max_epochs = 1000
