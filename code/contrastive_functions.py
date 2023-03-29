@@ -1,6 +1,7 @@
 import sys
 sys.path.append('../code/') 
 from pytorch_metric_learning import losses
+from pytorch_metric_learning.distances import LpDistance
 from pytorch_metric_learning.losses import BaseMetricLossFunction
 
 import mocap_functions
@@ -30,6 +31,7 @@ import pickle
 import seaborn as sns
 from hnn_core.utils import smooth_waveform
 from scipy.signal import savgol_filter
+# import haste_pytorch as haste
 #sns.set()
 #sns.set_style("white")
 
@@ -205,6 +207,7 @@ class model_lstm(nn.Module):
         if self.cat_features is not None:
             # cat_hidden = self.hidden_fc(torch.tanh(x[:, -1, self.cat_features]))
             # hidden = hidden + cat_hidden
+            # cell = cell + cat_hidden
 
             out_lstm, (hidden, cell) = self.lstm(x[:, :, ~self.cat_features], (hidden, cell))
 
@@ -213,7 +216,71 @@ class model_lstm(nn.Module):
 
         out_final = out_lstm.contiguous()
         out_final = self.fc(out_final)
-        return out_final, hidden, cell, out_lstm
+        return out_final, hidden, cell
+    
+    def init_hidden(self, batch_size):
+        weight = next(self.parameters()).data.to(self.device)
+
+        #LSTM initialization
+        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
+        cell = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device) + 1
+
+        return hidden, cell
+
+#RNN architecture for decoding kinematics
+class model_lstm_single(nn.Module):
+    def __init__(self, input_size, output_size, hidden_dim, n_layers, dropout, device, bidirectional=False,
+                 cat_features=None):
+        super(model_lstm_single, self).__init__()
+
+        #multiplier based on bidirectional parameter
+        if bidirectional:
+            num_directions = 2
+        else:
+            num_directions = 1
+
+        # Defining some parameters
+        self.hidden_dim = hidden_dim       
+        self.n_layers = 1
+        self.device = device
+        self.dropout_func = nn.Dropout(p=dropout)
+        self.bidirectional = bidirectional
+        self.cat_features = cat_features
+        self.input_size = input_size
+
+        if self.cat_features is not None:
+            self.num_cat_features = np.sum(self.cat_features).astype(int)
+            self.hidden_fc = nn.Linear(self.num_cat_features, self.hidden_dim)
+
+            self.input_size = self.input_size - self.num_cat_features
+            # self.input_size = self.input_size
+
+            
+        else:
+            self.fc = nn.Linear(self.hidden_dim * num_directions, output_size)
+
+        n_layers = 1
+        self.fc = nn.Linear((self.hidden_dim* num_directions), output_size)
+        self.lstm1 = nn.LSTM(self.input_size, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
+        self.lstm2  = nn.LSTM(self.hidden_dim, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
+    
+    def forward(self, x):
+        batch_size = x.size(0)
+        # Initializing hidden state for first input using method defined below
+        hidden0, cell0 = self.init_hidden(batch_size)
+
+        # Passing in the input and hidden state into the model and obtaining outputs
+        if self.cat_features is not None:
+            out1, (hidden1, cell1) = self.lstm1(x[:, :, ~self.cat_features], (hidden0, cell0))
+
+        else:
+            out1, (hidden1, cell1) = self.lstm1(x, (hidden0, cell0))
+
+        out2, (hidden2, cell2) = self.lstm2(self.dropout_func(out1), (hidden1, cell1))
+
+        out_final = out2.contiguous()
+        out_final = self.fc(out_final)
+        return out_final, (out1, out2), (cell1, cell2)
     
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data.to(self.device)
@@ -229,6 +296,7 @@ def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
 
     kinematic_noise = 20
     neural_noise = 1
+    # neural_noise = 5
     noise_rounds = 10
 
     neural_df_list = [neural_df]
@@ -489,8 +557,8 @@ def train_validate_model(model, optimizer, criterion, max_epochs, training_gener
             # output, hidden = model(batch_x)
             # train_loss = criterion(output[:,-10:-1,:], batch_y[:,-10:-1,:], hidden, labels)
 
-            output, hidden, cell, output_lstm = model(batch_x)
-            train_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, output_lstm, labels)
+            output, hidden, cell = model(batch_x)
+            train_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, labels)
             train_loss.backward() # Does backpropagation and calculates gradients
             optimizer.step() # Updates the weights accordingly
 
@@ -510,8 +578,8 @@ def train_validate_model(model, optimizer, criterion, max_epochs, training_gener
                 # output, hidden = model(batch_x)
                 # validation_loss = criterion(output[:,-10:-1,:], batch_y[:,-10:-1,:], hidden, labels)
 
-                output, hidden, cell, output_lstm = model(batch_x)
-                validation_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, output_lstm, labels)
+                output, hidden, cell = model(batch_x)
+                validation_loss = criterion(output[:,-1,:], batch_y[:,-1,:], hidden, cell, labels)
 
                 validation_batch_loss.append(validation_loss.item())
 
@@ -569,7 +637,7 @@ def evaluate_model(model, generator, device):
             labels = labels.float().to(device)
 
             # output, _ = model(batch_x)
-            output, _, _, _ = model(batch_x)
+            output, _, _ = model(batch_x)
             y_pred_tensor[batch_idx:(batch_idx+output.size(0)),:] = output[:,-1,:]
             batch_idx += output.size(0)
 
@@ -577,32 +645,39 @@ def evaluate_model(model, generator, device):
     return y_pred
     
 # Joint loss function: contrastive_loss + MSE
-def contrast_mse(y_pred, y_true, hidden, cell, output, labels, weight=0.1):
-    hidden = hidden.transpose(0,1)
+def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
+    hidden = torch.concat([hidden[0][:, -10:-1, :], hidden[1][:, -10:-1, :]], dim=2) # Hidden states returned separately for each layer
+
+    # cell = torch.concat(cell, dim=0) # Hidden states returned separately for each layer
+
+    # hidden = hidden.transpose(0,1)
+
     hidden = hidden.flatten(start_dim=1, end_dim=2)
 
-    cell = cell.transpose(0,1)
-    cell = cell.flatten(start_dim=1, end_dim=2)
+    # cell = cell.transpose(0,1)
+    # cell = cell.flatten(start_dim=1, end_dim=2)
 
-    # hidden_loss_func = losses.TripletMarginLoss()
+    loss_func = losses.SupConLoss(temperature=0.1, distance=LpDistance(power=2))
+    # loss_func = losses.SupConLoss(temperature=0.1)
 
-    loss_func = losses.SupConLoss(temperature=0.1)
     hidden_loss = loss_func(hidden, labels)
-    cell_loss = loss_func(cell, labels)
+    # cell_loss = loss_func(cell, labels)
     # output_loss = loss_func(output.flatten(start_dim=1, end_dim=2), labels)
 
 
     mse_loss_func = nn.MSELoss()
     mse_loss = mse_loss_func(y_pred, y_true)
 
-    loss = mse_loss + (weight * (hidden_loss + cell_loss))
+    # loss = mse_loss + (weight * (hidden_loss + cell_loss))
+    loss = mse_loss + (weight * hidden_loss)
+    # loss = mse_loss + (weight * cell_loss)
     # loss = mse_loss + (weight * output_loss)
 
 
     return loss
 
 # Dummy wrapper for MSE (last 3 parameters unused)
-def mse(y_pred, y_true, hidden, cell, output, labels, weight=1):
+def mse(y_pred, y_true, hidden, cell, labels, weight=1):
     mse_loss_func = nn.MSELoss()
     loss = mse_loss_func(y_pred, y_true)
     return loss
@@ -679,13 +754,15 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
     lr = 1e-4
     weight_decay = 1e-4
     hidden_dim = 100
+    # dropout = 0.0
     dropout = 0.5
     n_layers = 2
     max_epochs = 1000
     input_size = X_train_data.shape[1] 
     output_size = y_train_data.shape[1] 
 
-    model_rnn = model_lstm(input_size, output_size, hidden_dim, n_layers, dropout, device, cat_features=exclude_processing).to(device)
+    # model_rnn = model_lstm(input_size, output_size, hidden_dim, n_layers, dropout, device, cat_features=exclude_processing).to(device)
+    model_rnn = model_lstm_single(input_size, output_size, hidden_dim, n_layers, dropout, device, cat_features=exclude_processing).to(device)
 
     # Define Loss, Optimizerints h
     optimizer = torch.optim.Adam(model_rnn.parameters(), lr=lr, weight_decay=weight_decay)
