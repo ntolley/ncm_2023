@@ -140,7 +140,7 @@ def get_marker_decode_dataframes(noise_fold=0):
     # cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
     # val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
 
-    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=0.1, random_state=3)
+    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=0.5, random_state=3)
     val_split = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=3)
 
     cv_dict = {}
@@ -310,8 +310,10 @@ def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
     rng = np.random.default_rng(111)
 
     kinematic_noise = 20
+    # kinematic_noise = 40
     neural_noise = 1
     # neural_noise = 5
+
     noise_rounds = 10
 
     neural_df_list = [neural_df]
