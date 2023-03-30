@@ -64,14 +64,14 @@ def get_marker_decode_dataframes(noise_fold=0):
 
     num_trials = len(kinematic_df['trial'].unique())
 
-    # pos_filter = [1, 4]
     pos_filter = [1,2,3,4]
-    pos_remove_filter = [f'position_{pos_idx}' for pos_idx in []]
-    # pos_remove_filter = [f'position_{pos_idx}' for pos_idx in [2,3]]
-
     layout_filter = [1,2,3,4]
-    # layout_filter = [1,2]
+    pos_remove_filter = [f'position_{pos_idx}' for pos_idx in []]
     layout_remove_filter = [f'layout_{layout_idx}' for layout_idx in []]
+
+    # pos_filter = [1, 4]
+    # layout_filter = [1,2]
+    # pos_remove_filter = [f'position_{pos_idx}' for pos_idx in [2,3]]
     # layout_remove_filter = [f'layout_{layout_idx}' for layout_idx in [3,4]]
 
 
@@ -87,7 +87,8 @@ def get_marker_decode_dataframes(noise_fold=0):
 
     # Subselect specific marker
     # marker_list = ['ulnarDistal', 'carpal', 'thumbProx', 'ringProx','pinkyProx'] # cam4
-    marker_list = ['ringProx', 'pinkyProx', 'middleProx'] # cam4
+    # marker_list = ['ringProx', 'pinkyProx', 'middleProx'] # cam4
+    marker_list = ['ringProx'] # cam4
     # marker_list = ['indexProx', 'carpal', 'ringProx'] # cam1
 
     mask_list = [kinematic_df['name'].str.contains(pat=pat) for pat in marker_list]
@@ -136,8 +137,11 @@ def get_marker_decode_dataframes(noise_fold=0):
     
 
     #Generate cv_dict for regular train/test/validate split (no rolling window)
-    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
-    val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
+    # cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
+    # val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
+
+    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=0.1, random_state=3)
+    val_split = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=3)
 
     cv_dict = {}
     for fold, (train_val_idx, test_idx) in enumerate(cv_split.split(trial_ids, trial_labels)):
@@ -263,6 +267,9 @@ class model_lstm_single(nn.Module):
         self.fc = nn.Linear((self.hidden_dim* num_directions), output_size)
         self.lstm1 = nn.LSTM(self.input_size, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
         self.lstm2  = nn.LSTM(self.hidden_dim, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
+
+        # self.forget_bias(self.lstm1)
+        # self.forget_bias(self.lstm2)
     
     def forward(self, x):
         batch_size = x.size(0)
@@ -290,6 +297,14 @@ class model_lstm_single(nn.Module):
         cell = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
 
         return hidden, cell
+
+    def forget_bias(self, layer):
+        for names in layer._all_weights:
+            for name in filter(lambda n: "bias" in n,  names):
+                bias = getattr(layer, name)
+                n = bias.size(0)
+                start, end = n//4, n//2
+                bias.data[start:end].fill_(1.)
 
 def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
     rng = np.random.default_rng(111)
@@ -657,8 +672,8 @@ def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
     # cell = cell.transpose(0,1)
     # cell = cell.flatten(start_dim=1, end_dim=2)
 
-    loss_func = losses.SupConLoss(temperature=0.1, distance=LpDistance(power=2))
-    # loss_func = losses.SupConLoss(temperature=0.1)
+    # loss_func = losses.SupConLoss(temperature=0.1, distance=LpDistance(power=2))
+    loss_func = losses.SupConLoss(temperature=0.1)
 
     hidden_loss = loss_func(hidden, labels)
     # cell_loss = loss_func(cell, labels)
