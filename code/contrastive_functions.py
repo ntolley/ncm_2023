@@ -140,7 +140,7 @@ def get_marker_decode_dataframes(noise_fold=0):
     # cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
     # val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
 
-    cv_split = StratifiedShuffleSplit(n_splits=10, test_size=0.75, random_state=3)
+    cv_split = StratifiedShuffleSplit(n_splits=10, test_size=0.5, random_state=3)
     val_split = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=3)
 
     cv_dict = {}
