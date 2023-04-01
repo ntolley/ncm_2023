@@ -140,7 +140,7 @@ def get_marker_decode_dataframes(noise_fold=0):
     # cv_split = StratifiedShuffleSplit(n_splits=5, test_size=.25, random_state=3)
     # val_split = StratifiedShuffleSplit(n_splits=1, test_size=.25, random_state=3)
 
-    cv_split = StratifiedShuffleSplit(n_splits=5, test_size=0.5, random_state=3)
+    cv_split = StratifiedShuffleSplit(n_splits=10, test_size=0.75, random_state=3)
     val_split = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=3)
 
     cv_dict = {}
@@ -663,13 +663,14 @@ def evaluate_model(model, generator, device):
     
 # Joint loss function: contrastive_loss + MSE
 def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
-    hidden = torch.concat([hidden[0][:, -10:-1, :], hidden[1][:, -10:-1, :]], dim=2) # Hidden states returned separately for each layer
-
+    hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
+    hidden = hidden[:,-1,:]
+    
     # cell = torch.concat(cell, dim=0) # Hidden states returned separately for each layer
 
     # hidden = hidden.transpose(0,1)
 
-    hidden = hidden.flatten(start_dim=1, end_dim=2)
+    # hidden = hidden.flatten(start_dim=1, end_dim=2)
 
     # cell = cell.transpose(0,1)
     # cell = cell.flatten(start_dim=1, end_dim=2)
