@@ -254,7 +254,6 @@ class model_lstm_single(nn.Module):
 
         if self.cat_features is not None:
             self.num_cat_features = np.sum(self.cat_features).astype(int)
-            self.hidden_fc = nn.Linear(self.num_cat_features, self.hidden_dim)
 
             self.input_size = self.input_size - self.num_cat_features
             # self.input_size = self.input_size
@@ -309,8 +308,8 @@ class model_lstm_single(nn.Module):
 def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
     rng = np.random.default_rng(111)
 
-    kinematic_noise = 20
-    # kinematic_noise = 40
+    # kinematic_noise = 20
+    kinematic_noise = 10
     neural_noise = 1
     # neural_noise = 5
 
@@ -399,6 +398,7 @@ class SEE_Dataset(torch.utils.data.Dataset):
             self.make_labels = True
             self.trial_labels = self.get_labels(kinematic_df, neural_df)
             self.batch_labels = list()
+            self.batch_trials = list()
         else:
             self.make_labels = False
 
@@ -416,7 +416,9 @@ class SEE_Dataset(torch.utils.data.Dataset):
 
         if self.make_labels:
             assert len(self.batch_labels) == self.num_samples
+            assert len(self.batch_trials) == self.num_samples
             self.batch_labels = torch.tensor(self.batch_labels)
+            self.batch_trials = torch.tensor(self.batch_trials)
 
     def __len__(self):
         #'Denotes the total number of samples'
@@ -465,6 +467,7 @@ class SEE_Dataset(torch.utils.data.Dataset):
             
             if make_labels:
                 self.batch_labels.extend(np.repeat(self.trial_labels[trial_idx], unfolded_trial.size(0)))
+                self.batch_trials.extend(np.repeat(trial_idx, unfolded_trial.size(0)))
         
         data_tensor = torch.concat(unfolded_data_list, axis=0)
 
@@ -664,13 +667,13 @@ def evaluate_model(model, generator, device):
 # Joint loss function: contrastive_loss + MSE
 def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
     hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
-    hidden = hidden[:,-1,:]
+    hidden = hidden[:,-10:-1,:]
     
     # cell = torch.concat(cell, dim=0) # Hidden states returned separately for each layer
 
     # hidden = hidden.transpose(0,1)
 
-    # hidden = hidden.flatten(start_dim=1, end_dim=2)
+    hidden = hidden.flatten(start_dim=1, end_dim=2)
 
     # cell = cell.transpose(0,1)
     # cell = cell.flatten(start_dim=1, end_dim=2)
