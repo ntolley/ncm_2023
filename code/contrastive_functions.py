@@ -46,19 +46,18 @@ device = torch.device("cuda:0")
 torch.backends.cudnn.benchmark = True
 
 def load_mocap_df(data_path, kinematic_suffix=None):
-    kinematic_df = pd.read_pickle(f'{data_path}kinematic_df{kinematic_suffix}_preevent.pkl')
-    neural_df = pd.read_pickle(data_path + 'neural_df_preevent.pkl')
+    kinematic_df = pd.read_pickle(f'{data_path}kinematic_df{kinematic_suffix}_preevent_onehottime.pkl')
+    neural_df = pd.read_pickle(data_path + 'neural_df_preevent_onehottime.pkl')
 
     # read python dict back from the file
-    metadata_file = open(data_path + 'metadata_preevent.pkl', 'rb')
+    metadata_file = open(data_path + 'metadata_preevent_onehottime.pkl', 'rb')
     metadata = pickle.load(metadata_file)
     metadata_file.close()
 
     return kinematic_df, neural_df, metadata
 
 # Prepare dataframes for movement decoding
-def get_marker_decode_dataframes(noise_fold=0):
-    cam_idx = 1
+def get_marker_decode_dataframes(noise_fold=0, cam_idx=4):
     # kinematic_df, neural_df, metadata = mocap_functions.load_mocap_df('../data/SPK20220308/task_data/', kinematic_suffix=f'_cam{cam_idx}')
     kinematic_df, neural_df, metadata = load_mocap_df('../data/SPK20220308/task_data/', kinematic_suffix=f'_cam{cam_idx}')
 
@@ -255,6 +254,7 @@ class model_lstm_single(nn.Module):
         if self.cat_features is not None:
             self.num_cat_features = np.sum(self.cat_features).astype(int)
 
+
             self.input_size = self.input_size - self.num_cat_features
             # self.input_size = self.input_size
 
@@ -360,7 +360,7 @@ def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
 class SEE_Dataset(torch.utils.data.Dataset):
     #'Characterizes a dataset for PyTorch'
     def __init__(self, cv_dict, fold, partition, kinematic_df, neural_df, offset, window_size, data_step_size, device,
-                 kinematic_type='posData', scale_neural=True, scale_kinematics=True, flip_outputs=False,
+                 scale_neural=True, scale_kinematics=True, flip_outputs=False,
                  exclude_neural=None, exclude_kinematic=None, neural_scaler=None, kinematic_scaler=None,
                  label_col=None):
         #'Initialization'
@@ -529,7 +529,7 @@ def make_generators(pred_df, neural_df, neural_offset, cv_dict, metadata,
 
     # Generators
     training_set = SEE_Dataset(cv_dict, fold, 'train_idx', pred_df, neural_df, offset, window_size, 
-                               data_step_size, device, 'posData', scale_neural=scale_neural,
+                               data_step_size, device, scale_neural=scale_neural,
                                scale_kinematics=scale_kinematics, flip_outputs=flip_outputs,
                                exclude_neural=exclude_neural, exclude_kinematic=exclude_kinematics, label_col=label_col)
     training_neural_scaler = training_set.neural_scaler
@@ -539,14 +539,14 @@ def make_generators(pred_df, neural_df, neural_offset, cv_dict, metadata,
     training_eval_generator = torch.utils.data.DataLoader(training_set, **train_eval_params)
 
     validation_set = SEE_Dataset(cv_dict, fold, 'validation_idx', pred_df, neural_df, offset, window_size, 
-                                 data_step_size, device, 'posData', scale_neural=scale_neural,
+                                 data_step_size, device, scale_neural=scale_neural,
                                  scale_kinematics=scale_kinematics, flip_outputs=flip_outputs,
                                  exclude_neural=exclude_neural, exclude_kinematic=exclude_kinematics,
                                  neural_scaler=training_neural_scaler, kinematic_scaler=training_kinematic_scaler, label_col=label_col)
     validation_generator = torch.utils.data.DataLoader(validation_set, **validation_params)
 
     testing_set = SEE_Dataset(cv_dict, fold, 'test_idx', pred_df, neural_df, offset, window_size, 
-                              data_step_size, device, 'posData', scale_neural=scale_neural,
+                              data_step_size, device, scale_neural=scale_neural,
                               scale_kinematics=scale_kinematics, flip_outputs=flip_outputs,
                               exclude_neural=exclude_neural, exclude_kinematic=exclude_kinematics,
                               neural_scaler=training_neural_scaler, kinematic_scaler=training_kinematic_scaler, label_col=label_col)
@@ -667,7 +667,7 @@ def evaluate_model(model, generator, device):
 # Joint loss function: contrastive_loss + MSE
 def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
     hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
-    hidden = hidden[:,-10:-1,:]
+    hidden = hidden[:,-20:-1,:]
     
     # cell = torch.concat(cell, dim=0) # Hidden states returned separately for each layer
 
@@ -679,7 +679,7 @@ def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
     # cell = cell.flatten(start_dim=1, end_dim=2)
 
     # loss_func = losses.SupConLoss(temperature=0.1, distance=LpDistance(power=2))
-    loss_func = losses.SupConLoss(temperature=0.1)
+    loss_func = losses.SupConLoss(temperature=10)
 
     hidden_loss = loss_func(hidden, labels)
     # cell_loss = loss_func(cell, labels)
@@ -707,12 +707,12 @@ def mse(y_pred, y_true, hidden, cell, labels, weight=1):
 def run_wiener(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True, window_size=10, num_cat=0, label_col=None):
     # window_size = 1 # doesn't matter for kalman filter
     # neural_offset = 2
+    exclude_processing = None
     if task_info:
-        exclude_processing = np.zeros(len(neural_df['unit'].unique()))
-        exclude_processing[-num_cat:] = np.ones(num_cat)
-        exclude_processing = exclude_processing.astype(bool)
-    else:
-        exclude_processing = None
+        if num_cat > 0:
+            exclude_processing = np.zeros(len(neural_df['unit'].unique()))
+            exclude_processing[-num_cat:] = np.ones(num_cat)
+            exclude_processing = exclude_processing.astype(bool)
 
     data_arrays, generators = make_generators(
     pred_df, neural_df, neural_offset, cv_dict, metadata, 
@@ -746,20 +746,21 @@ def run_wiener(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=T
     return model_wr, res_dict
 
 def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True,
-            window_size=10, num_cat=0, label_col=None):
+            window_size=10, num_cat=0, label_col=None, flip_outputs=False):
+    exclude_processing = None
     if task_info:
-        exclude_processing = np.zeros(len(neural_df['unit'].unique()))
-        exclude_processing[-num_cat:] = np.ones(num_cat)
-        exclude_processing = exclude_processing.astype(bool)
         criterion = contrast_mse
+        if num_cat > 0:
+            exclude_processing = np.zeros(len(neural_df['unit'].unique()))
+            exclude_processing[-num_cat:] = np.ones(num_cat)
+            exclude_processing = exclude_processing.astype(bool)
 
     else:
-        exclude_processing = None
         criterion = mse
 
     data_arrays, generators = make_generators(
     pred_df, neural_df, neural_offset, cv_dict, metadata, exclude_neural=exclude_processing,
-    window_size=window_size, flip_outputs=True, batch_size=1000, label_col=label_col)
+    window_size=window_size, flip_outputs=flip_outputs, batch_size=1000, label_col=label_col)
 
     # Unpack tuple into variables
     training_set, validation_set, testing_set = data_arrays
@@ -774,7 +775,7 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
     #Define hyperparameters
     lr = 1e-4
     weight_decay = 1e-4
-    hidden_dim = 100
+    hidden_dim = 300
     # dropout = 0.0
     dropout = 0.5
     n_layers = 2
