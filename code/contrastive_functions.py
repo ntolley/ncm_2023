@@ -85,16 +85,16 @@ def get_marker_decode_dataframes(noise_fold=0, cam_idx=4):
     kinematic_df = kinematic_df[~np.in1d(kinematic_df['name'], layout_remove_filter)].reset_index(drop=True)
 
     # Subselect specific marker
-    # marker_list = ['ulnarDistal', 'carpal', 'thumbProx', 'ringProx','pinkyProx'] # cam4
+    marker_list = ['indexProx', 'thumbProx', 'ringProx', 'carpal', 'pinkyProx', 'middleProx'] # cam4
     # marker_list = ['ringProx', 'pinkyProx', 'middleProx'] # cam4
-    marker_list = ['ringProx'] # cam4
+    # marker_list = ['ringProx'] # cam4
     # marker_list = ['indexProx', 'carpal', 'ringProx'] # cam1
 
     mask_list = [kinematic_df['name'].str.contains(pat=pat) for pat in marker_list]
     wrist_df = kinematic_df[np.logical_or.reduce(mask_list)]
 
     # Remove trials with velocity outliers
-    velocity_outlier_thresh = 6
+    velocity_outlier_thresh = 10
     velocity_std = np.concatenate(wrist_df['posData'].map(np.diff).values).std()
     velocity_outlier_mask = wrist_df['posData'].map(np.diff).apply(
         lambda x: np.any(np.abs(x - np.mean(x)) > velocity_outlier_thresh * velocity_std))
@@ -104,7 +104,7 @@ def get_marker_decode_dataframes(noise_fold=0, cam_idx=4):
     neural_df = neural_df[neural_df['trial'].apply(lambda x: x not in velocity_outlier_trials)]
 
     # Remove trials with length outliers
-    length_outlier_thresh = 3
+    length_outlier_thresh = 10
     trial_lengths = wrist_df['posData'].map(len).values
     length_outlier_mask = np.abs(trial_lengths - np.mean(trial_lengths)) > length_outlier_thresh * np.std(trial_lengths)
     length_outlier_trials = wrist_df[length_outlier_mask]['trial'].unique()
@@ -305,12 +305,12 @@ class model_lstm_single(nn.Module):
                 start, end = n//4, n//2
                 bias.data[start:end].fill_(1.)
 
-def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials):
+def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials, kinematic_noise=10, neural_noise=1):
     rng = np.random.default_rng(111)
 
     # kinematic_noise = 20
-    kinematic_noise = 10
-    neural_noise = 1
+    # kinematic_noise = 10
+    # neural_noise = 1
     # neural_noise = 5
 
     noise_rounds = 10
@@ -665,26 +665,22 @@ def evaluate_model(model, generator, device):
     return y_pred
     
 # Joint loss function: contrastive_loss + MSE
-def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1):
+def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=10):
     hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
-    hidden = hidden[:,-20:-1,:]
+    hidden = hidden[:,-2:,:]
     
-    # cell = torch.concat(cell, dim=0) # Hidden states returned separately for each layer
-
-    # hidden = hidden.transpose(0,1)
+    # cell = torch.concat([cell[0], cell[1]], dim=2) # Hidden states returned separately for each layer
+    # cell = cell[0,:,:]
 
     hidden = hidden.flatten(start_dim=1, end_dim=2)
 
-    # cell = cell.transpose(0,1)
     # cell = cell.flatten(start_dim=1, end_dim=2)
 
-    # loss_func = losses.SupConLoss(temperature=0.1, distance=LpDistance(power=2))
-    loss_func = losses.SupConLoss(temperature=10)
+    loss_func = losses.SupConLoss(temperature=temperature, distance=LpDistance(power=1))
+    # loss_func = losses.SupConLoss(temperature=temperature)
 
     hidden_loss = loss_func(hidden, labels)
     # cell_loss = loss_func(cell, labels)
-    # output_loss = loss_func(output.flatten(start_dim=1, end_dim=2), labels)
-
 
     mse_loss_func = nn.MSELoss()
     mse_loss = mse_loss_func(y_pred, y_true)
