@@ -667,12 +667,13 @@ def evaluate_model(model, generator, device):
 # Joint loss function: contrastive_loss + MSE
 def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=10):
     hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
-    hidden = hidden[:,-2:,:]
+    # hidden = hidden[0]
+    hidden = hidden[:,-1,:]
     
     # cell = torch.concat([cell[0], cell[1]], dim=2) # Hidden states returned separately for each layer
     # cell = cell[0,:,:]
 
-    hidden = hidden.flatten(start_dim=1, end_dim=2)
+    # hidden = hidden.flatten(start_dim=1, end_dim=2)
 
     # cell = cell.flatten(start_dim=1, end_dim=2)
 
@@ -688,7 +689,6 @@ def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=1
     # loss = mse_loss + (weight * (hidden_loss + cell_loss))
     loss = mse_loss + (weight * hidden_loss)
     # loss = mse_loss + (weight * cell_loss)
-    # loss = mse_loss + (weight * output_loss)
 
 
     return loss
@@ -770,6 +770,7 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
 
     #Define hyperparameters
     lr = 1e-4
+    # weight_decay = 1e-4
     weight_decay = 1e-4
     hidden_dim = 300
     # dropout = 0.0
