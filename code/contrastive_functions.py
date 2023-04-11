@@ -266,8 +266,9 @@ class model_lstm_single(nn.Module):
         self.fc = nn.Linear((self.hidden_dim* num_directions), output_size)
         self.lstm1 = nn.LSTM(self.input_size, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
         self.lstm2  = nn.LSTM(self.hidden_dim, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
+        # self.lstm3  = nn.LSTM(self.hidden_dim, self.hidden_dim, n_layers, batch_first=True, dropout=0, bidirectional=bidirectional)
 
-        # self.forget_bias(self.lstm1)
+        self.forget_bias(self.lstm1) # Setting forget bias on first layer important for SUA results
         # self.forget_bias(self.lstm2)
     
     def forward(self, x):
@@ -287,6 +288,11 @@ class model_lstm_single(nn.Module):
         out_final = out2.contiguous()
         out_final = self.fc(out_final)
         return out_final, (out1, out2), (cell1, cell2)
+
+        # out3, (hidden3, cell3) = self.lstm3(self.dropout_func(out2), (hidden2, cell2))
+        # out_final = out3.contiguous()
+        # out_final = self.fc(out_final)
+        # return out_final, (out1, out2, out3), (cell1, cell2, cell3)
     
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data.to(self.device)
@@ -307,11 +313,6 @@ class model_lstm_single(nn.Module):
 
 def add_noise(neural_df, wrist_df, cv_dict, fold, num_trials, kinematic_noise=10, neural_noise=1):
     rng = np.random.default_rng(111)
-
-    # kinematic_noise = 20
-    # kinematic_noise = 10
-    # neural_noise = 1
-    # neural_noise = 5
 
     noise_rounds = 10
 
@@ -665,9 +666,8 @@ def evaluate_model(model, generator, device):
     return y_pred
     
 # Joint loss function: contrastive_loss + MSE
-def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=10):
+def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=0.1):
     hidden = torch.concat([hidden[0], hidden[1]], dim=2) # Hidden states returned separately for each layer
-    # hidden = hidden[0]
     hidden = hidden[:,-1,:]
     
     # cell = torch.concat([cell[0], cell[1]], dim=2) # Hidden states returned separately for each layer
@@ -677,7 +677,7 @@ def contrast_mse(y_pred, y_true, hidden, cell, labels, weight=0.1, temperature=1
 
     # cell = cell.flatten(start_dim=1, end_dim=2)
 
-    loss_func = losses.SupConLoss(temperature=temperature, distance=LpDistance(power=1))
+    loss_func = losses.SupConLoss(temperature=temperature, distance=LpDistance(power=2))
     # loss_func = losses.SupConLoss(temperature=temperature)
 
     hidden_loss = loss_func(hidden, labels)
@@ -742,10 +742,10 @@ def run_wiener(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=T
     return model_wr, res_dict
 
 def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True,
-            window_size=10, num_cat=0, label_col=None, flip_outputs=False):
+            window_size=10, num_cat=0, label_col=None, flip_outputs=False, temperature=0.1, dropout=0.5):
     exclude_processing = None
     if task_info:
-        criterion = contrast_mse
+        criterion = partial(contrast_mse, temperature=temperature)
         if num_cat > 0:
             exclude_processing = np.zeros(len(neural_df['unit'].unique()))
             exclude_processing[-num_cat:] = np.ones(num_cat)
@@ -773,8 +773,6 @@ def run_rnn(pred_df, neural_df, neural_offset, cv_dict, metadata, task_info=True
     # weight_decay = 1e-4
     weight_decay = 1e-4
     hidden_dim = 300
-    # dropout = 0.0
-    dropout = 0.5
     n_layers = 2
     max_epochs = 1000
     input_size = X_train_data.shape[1] 
